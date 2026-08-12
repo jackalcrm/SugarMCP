@@ -1,0 +1,30 @@
+# Credentials. `.env` holds a real Sugar username and password, and the backups this
+# project's scripts create (.env.backup-HHMMSS) hold them too — an early version of this
+# file ignored only `.env`, which would have committed a backup containing live credentials.
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Built package artifacts
+sugar-package/dist/
+
+# Recorded test fixtures. Verbatim captures from a real Sugar instance, carrying
+# customer-identifying detail: custom field and module names, instance identifiers, and
+# sample record data rendered into the help page. Regenerate on demand with
+# `uv run scripts/capture_fixtures.py`; tests that need them skip cleanly when absent.
+fixtures/*
+!fixtures/.gitkeep
+!fixtures/README.md
+
+# Local scratch
+*.log
+.DS_Store
+SugarMCP.code-workspace

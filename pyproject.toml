@@ -1,0 +1,25 @@
+[project]
+name = "sugarmcp"
+version = "0.1.0"
+description = "MCP server for SugarCRM — runtime metadata discovery, no hard-coded modules or fields"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+keyring = [
+    "keyring>=25.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
