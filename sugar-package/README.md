@@ -2,12 +2,13 @@
 
 Optional module-loadable package for the SugarMCP server. **The server works without it.**
 
-Build: `dist/sugarmcp-0.1.0.zip` — install via **Admin → Module Loader**, then run
-**Admin → Repair → Quick Repair and Rebuild**.
+Build: `./tools/build.sh` → `dist/sugarmcp-<version>.zip` (needs only `zip`; no Sugar instance
+required). Install via **Admin → Module Loader**, then run **Admin → Repair → Quick Repair and
+Rebuild**. Module Loader runs its own policy scans on upload — see below for what they enforce.
 
-> **Status: passes Module Loader's package scan; not yet installed.** The scan is verified
-> (see below). Runtime behaviour is not — treat the PHP as unproven until it has been
-> installed once and `scripts/check_session.py` reports `/mcp/help: True`.
+> **Status: built and known scan-clean; not yet installed.** Runtime behaviour is unproven —
+> treat the PHP as unproven until it has been installed once and `scripts/check_session.py`
+> reports `/mcp/help: True`.
 
 ## Module Loader restrictions
 
@@ -26,8 +27,8 @@ Rules are in `src/Rector/config.php` on the instance. The one that caught this p
 Fixed by declaring `string $needle` rather than taking Rector's suggested `(string)` cast —
 the type is the actual contract, the cast just silences the check.
 
-Note this scan reports as a **downloadable report** rather than inline text, so the specific
-finding is easy to miss. `tools/scan.sh` prints it directly.
+Note this scan reports as a **downloadable report** rather than inline text in the Module
+Loader UI, so a specific finding is easy to miss — check the report, not just the page.
 
 ### ModuleScanner (denylist)
 
@@ -50,29 +51,12 @@ only `.php`), and `ReflectionClass`, `ZipArchive`, `SplFileObject`, `ob_start`, 
 functions `$f()` and backticks are all denied. SugarCloud instances cannot relax any of it;
 on-site instances can, via `config_override.php` — but needing to is a smell.
 
-### Verify before uploading
+### Where validation happens
 
-```bash
-./tools/scan.sh          # both scans against dist/*.zip
-```
-
-```
-== 1/2  ModuleScanner (denylist) ==
-CLEAN — no package-scan issues
-
-== 2/2  Rector (PHP compatibility) ==
-Scanning 5 PHP file(s)
-CLEAN — no PHP compatibility issues
-
-PACKAGE OK — both scans clean
-```
-
-This runs the same two scanners Module Loader uses, against the same instance configuration,
-so violations surface at build time instead of after upload. Both harnesses were checked
-against deliberately bad files first and reproduced the real failures exactly, so a `CLEAN`
-result means something.
-
-Set `SUGAR_HOST` / `SUGAR_ROOT` to point at a different instance.
+Both scans run **inside Module Loader on upload** — they need Sugar's bootstrap, so they run
+on the instance, not at build time. `build.sh` only assembles the zip; it makes no assumption
+about a local Sugar. If a scan rejects the package, the fixes above are the ones this package
+already had to make.
 
 ## What it does
 

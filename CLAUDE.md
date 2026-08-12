@@ -17,7 +17,7 @@ uv run scripts/check_write.py      # validation + create/update/link/delete roun
 uv run scripts/check_discovery.py  # endpoint catalog and raw-call guards
 uv run scripts/check_stdio.py      # real stdio transport + SUGAR_READ_ONLY
 
-sugar-package/tools/scan.sh        # Module Loader policy scans (both of them)
+sugar-package/tools/build.sh       # build the Module Loader zip (dist/sugarmcp-<ver>.zip)
 ```
 
 `uv` lives at `~/.local/bin/uv` and is not on the default PATH in every context.
@@ -26,13 +26,13 @@ Development runs against a Sugar 25.x ENT dev instance; point the server at it w
 `SUGAR_URL` in `.env`. Do not assume the instance is local — it is reached over HTTP and is
 expected to become remote. Everything the server does goes through the REST API.
 
-Two things need the instance *filesystem* rather than the API, and only work where that
-filesystem is reachable (currently a `~/Sites` web root behind a vhost; over SSH/OrbStack
-otherwise): writing the PHP package against the real `HelpApi`, and running the Module Loader
-scanners. Point those at the web root with `SUGAR_ROOT`, and set `SUGAR_RUN` if it lives on
-another host (see `sugar-package/tools/scan.sh`). The dev instance is heavily customized and
-large — six-figure record counts on the core modules — which is why context-budget shaping
-matters.
+Nothing in the workflow assumes a local Sugar. The optional package is built with `zip` alone
+(`sugar-package/tools/build.sh`) and validated by Module Loader on upload; the server itself
+only ever speaks REST to `SUGAR_URL`. The one thing that wants the instance *filesystem* is
+authoring the PHP package against the real `HelpApi`, a dev-time convenience done wherever that
+filesystem happens to be reachable — not a runtime dependency. The dev instance is heavily
+customized and large — six-figure record counts on the core modules — which is why
+context-budget shaping matters.
 
 ## Fixtures are not in the repo
 
@@ -136,9 +136,11 @@ Verified Sugar session constraints, which govern any multi-user design:
 
 ## Sugar-side package (sugar-package/)
 
-Optional; the server works without it and probes at startup. Module Loader runs **two**
+Optional; the server works without it and probes at startup. Build the zip with
+`tools/build.sh` (needs only `zip`); Module Loader validates it on upload with **two**
 independent scans — `ModuleScanner` (function/class denylist) and Rector (PHP compatibility).
-A package can pass one and fail the other; `tools/scan.sh` runs both. Every callback-taking
-function and every filesystem read is denied.
+A package can pass one and fail the other. Every callback-taking function and every filesystem
+read is denied, which is why the PHP avoids `usort`/`array_map`/`file_get_contents` — see
+`sugar-package/README.md`.
 
 Currently **built and scan-clean but never installed**, so the PHP is unproven at runtime.
