@@ -51,8 +51,9 @@ async def main() -> int:
     started = time.time()
     result = await call("sugar_list_endpoints", limit=5)
     cold = time.time() - started
-    check(result.get("total_available", 0) > 500,
-          f"catalog built — {result.get('total_available')} endpoints in {cold:.1f}s "
+    total_available = result.get("total_available", 0)
+    check(total_available > 500,
+          f"catalog built — {total_available} endpoints in {cold:.1f}s "
           f"via {result.get('catalog_source')}")
     if result.get("note"):
         print(f"        {result['note'][:110]}")
@@ -61,10 +62,13 @@ async def main() -> int:
     await call("sugar_list_endpoints", limit=5)
     print(f"        warm: {time.time() - started:.3f}s")
 
-    # The payoff: endpoints that exist only on this instance.
+    # The payoff: endpoints that exist only on this instance. The count is instance-specific
+    # — a fresh instance may show only the couple the SugarMCP package adds, a customized one
+    # dozens — so assert custom_only returns a real, non-empty subset, not a fixed number.
     result = await call("sugar_list_endpoints", custom_only=True, limit=30)
-    check(result.get("count", 0) >= 15,
-          f"custom endpoints found — {result.get('count')}")
+    custom_count = result.get("count", 0)
+    check(0 < custom_count < total_available,
+          f"custom endpoints found — {custom_count} of {total_available}")
     for endpoint in (result.get("endpoints") or [])[:6]:
         print(f"        {endpoint['method']:<7} {endpoint['path']:<44} "
               f"{Path(endpoint.get('source', '')).name}")
