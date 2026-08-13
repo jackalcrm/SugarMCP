@@ -26,6 +26,7 @@ from sugar.shaping import (
     clamp,
     describe_truncation,
     encode_filter_params,
+    record_web_url,
     resolve_fields,
     shape_list,
     trim_record,
@@ -234,7 +235,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         """Query records in a module using Sugar's filter DSL.
 
         The primary way to find records. Always prefer this over fetching everything and
-        filtering yourself — this module has 147,000+ Accounts.
+        filtering yourself — a core module here can hold six-figure record counts.
 
         **Filter syntax.** ``filter`` is a list of conditions, ANDed together. Each
         condition maps a field name to either a bare value (meaning equals) or an operator
@@ -269,7 +270,10 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
             offset: starting row; pass back the ``next_offset`` from a previous call.
 
         Returns:
-            Matching records, plus ``next_offset`` for pagination (``-1`` = no more).
+            Matching records, ``next_offset`` for pagination (``-1`` = no more), and
+            ``instance_url`` (the Sugar web root). Build a record's clickable link as
+            ``instance_url + "/#" + module + "/" + <id>`` and present rows as
+            ``[<name>](<url>)``; opening one requires the user be logged into Sugar there.
         """
         context = ctx()
         config = context.config
@@ -316,6 +320,9 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         result = shape_list(payload)
         result["module"] = module
         result["fields_returned"] = projection
+        # The base URL once, not per row — the model builds each record's link from it and
+        # the row's id, keeping the list projection lean. See the tool's Returns note.
+        result["instance_url"] = context.config.url
 
         warnings: list[str] = []
         if unknown:
@@ -390,13 +397,19 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
                 heavily-customized module that can be large, so naming fields is better.
 
         Returns:
-            The record, with empty scaffolding stripped and long text truncated.
+            The record (empty scaffolding stripped, long text truncated) and ``url`` — its
+            page in the Sugar web UI. Offer it as a clickable link, e.g. ``[<name>](<url>)``.
+            Opening the link requires the user to be logged into Sugar in that browser.
         """
         context = ctx()
         params = {"fields": ",".join(resolve_fields(fields))} if fields else None
         payload = context.client.get(f"{module}/{record_id}", params)
         record = trim_record(payload) if isinstance(payload, dict) else payload
-        return {"module": module, "record": record}
+        return {
+            "module": module,
+            "record": record,
+            "url": record_web_url(context.config.url, module, record_id),
+        }
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors

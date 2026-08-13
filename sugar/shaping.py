@@ -28,6 +28,17 @@ DEFAULT_TEXT_LIMIT = 500
 _SCAFFOLDING = frozenset({"_module", "_erased_fields", "_hash"})
 
 
+def record_web_url(base_url: str, module: str, record_id: str) -> str:
+    """Build a record's Sugar web-UI URL: ``<base>/#<Module>/<id>``.
+
+    Sidecar routes records behind the hash fragment, so this is the link a user clicks to
+    open the record in the browser (they must be logged into Sugar there). ``base_url`` is the
+    instance root as configured — already stored without a trailing slash — so a subpath
+    install like ``http://host/sugar`` yields ``http://host/sugar/#Accounts/<id>``.
+    """
+    return f"{base_url}/#{module}/{record_id}"
+
+
 def resolve_fields(
     requested: Iterable[str] | None,
     *,

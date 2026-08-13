@@ -6,6 +6,7 @@ from sugar.shaping import (
     clamp,
     describe_truncation,
     encode_filter_params,
+    record_web_url,
     resolve_fields,
     shape_list,
     trim_record,
@@ -149,3 +150,21 @@ def test_in_operator_list_is_indexed():
 
 def test_booleans_rendered_the_way_sugar_expects():
     assert encode_filter_params([{"deleted": False}]) == {"filter[0][deleted]": "false"}
+
+
+# -- record web URLs ---------------------------------------------------------
+
+
+def test_record_web_url_uses_sidecar_hash_route():
+    assert (
+        record_web_url("http://host", "Accounts", "abc-123")
+        == "http://host/#Accounts/abc-123"
+    )
+
+
+def test_record_web_url_preserves_subpath_install():
+    """A subpath install (base already has no trailing slash) keeps the /sugar segment."""
+    assert (
+        record_web_url("http://docker.local:8088/sugar", "Contacts", "id9")
+        == "http://docker.local:8088/sugar/#Contacts/id9"
+    )
