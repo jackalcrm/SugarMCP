@@ -26,7 +26,11 @@ $manifest = [
     'type' => 'module',
     'acceptable_sugar_flavors' => ['PRO', 'CORP', 'ENT', 'ULT'],
     'acceptable_sugar_versions' => [
-        'regex_matches' => ['^(1[0-9]|2[0-9])\\.\\d+\\.\\d+$'],
+        // Sugar tests this with preg_match("/$regex/", $sugar_version) — unanchored, no
+        // delimiters added beyond the slashes. A trailing $ therefore rejects dev/rc builds
+        // whose version carries a suffix (e.g. 25.2.0-dev.1, 25.3.0-rc.2). Anchor the start
+        // only: any 10.x–29.x major, suffix or not.
+        'regex_matches' => ['^(1[0-9]|2[0-9])\\.'],
     ],
 ];
 
