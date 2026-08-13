@@ -144,3 +144,20 @@ read is denied, which is why the PHP avoids `usort`/`array_map`/`file_get_conten
 `sugar-package/README.md`.
 
 Currently **built and scan-clean but never installed**, so the PHP is unproven at runtime.
+
+**Manual alternative (no package, per instance).** Everything the package sets up can be done
+in Admin, and this is how the running setup actually works:
+
+- Register the platform: **Admin → Configure API Platforms**, add `mcp`.
+- Create the OAuth consumer key: **Admin → OAuth Keys**, key `mcp`, OAuth 2.0, client type
+  **Sugar User** (`client_type='user'` — the default type fails a custom platform with
+  `invalid_client`). Put the secret in `.env` as `SUGAR_CLIENT_SECRET`.
+
+Both are **per instance** — a new target (e.g. a demo box) needs its own platform entry and its
+own key; `SUGAR_CLIENT_ID`/`SUGAR_CLIENT_SECRET` in `.env` must match that instance's key.
+
+A Module Loader upload that reports *"does not contain a manifest"* despite a root
+`manifest.php` was a **local-instance quirk**, not a package defect: verified against the
+instance's own extractor (`unzip_file`/`ZipArchive::extractTo`), which pulls the manifest out
+of `build.sh`'s zip cleanly. `build.sh` now also self-checks the archive (root manifest, no
+macOS `__MACOSX`/`._*`/`.DS_Store`/`./` junk) and aborts otherwise.
