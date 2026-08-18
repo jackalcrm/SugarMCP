@@ -14,13 +14,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from sugar.context import SugarContext, get_context
 from sugar.discovery import refuses_path
 from sugar.shaping import trim_record
 
+from .progress import report as report_progress
 from .read import READ_ONLY, tool_errors
 
 log = logging.getLogger("sugarmcp.tools.discovery")
@@ -66,12 +67,13 @@ def register(
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_list_endpoints(
+    async def sugar_list_endpoints(
         query: str = "",
         module: str = "",
         method: str = "",
         custom_only: bool = False,
         limit: int = 50,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Search this instance's REST API endpoints, including custom ones.
 
@@ -92,8 +94,10 @@ def register(
         Returns:
             Matching endpoints with method, path, description and source file.
         """
+        await report_progress(mcp_ctx, 1, total=2, message="Loading REST endpoint catalog")
         context = ctx()
         catalog = context.catalog
+        await report_progress(mcp_ctx, 2, total=2, message="Searching catalog")
         results = catalog.search(
             query=query, module=module, method=method,
             custom_only=custom_only, limit=limit,

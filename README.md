@@ -23,7 +23,7 @@ a real user and inherits that user's ACLs, which Sugar itself enforces.
 | 6 | Sugar-side package | built, **not installed** |
 | 7 | Endpoint discovery, raw API escape hatches | done, verified live |
 
-191 unit tests pass, plus six scripts that verify each layer against a live instance.
+201 unit tests pass, plus six scripts that verify each layer against a live instance.
 
 ## Setup on a new machine
 
@@ -186,7 +186,7 @@ uv run scripts/capture_fixtures.py --list     # what exists, and how stale
 uv run scripts/capture_acl_fixture.py <user_name> nonadmin   # a restricted user's ACL
 ```
 
-Without them the suite reports **139 passed, 52 skipped**, with a message naming the command.
+Without them the suite reports **149 passed, 52 skipped**, with a message naming the command.
 Everything synthetic still runs, including the whole ACL-inversion safety net; what skips is
 the set asserting against real payloads. See [fixtures/README.md](fixtures/README.md).
 
@@ -233,7 +233,12 @@ its maximum — `v11_30` returns 200 on a 25.2 instance — so the 301 `incorrec
 never fires. The ladder stays as insurance for older instances.
 
 **Logging goes to stderr.** Under stdio, stdout carries the JSON-RPC stream; a stray `print()`
-corrupts it and the client reports the server as broken with no useful error.
+corrupts it and the client reports the server as broken with no useful error. Protocol-level
+logging (`ctx.info`, `notifications/message`) is deprecated as of 2026-07-28; this server does
+not send it. Long-running tools instead emit **progress notifications** (`report_progress`) so
+Claude Code / Desktop can show a status line while a report fetch or metadata load is still
+running, instead of looking stalled. The client opts in per call; with no listener the
+notifications are a no-op.
 
 **A dead token reports `invalid_grant`, not `need_login`.** When a session is evicted — another
 login taking the same platform slot — the next call 401s with `invalid_grant`. From the token

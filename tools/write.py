@@ -15,13 +15,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from sugar.context import SugarContext, get_context
 from sugar.shaping import trim_record
 from sugar.validation import ValidationError, WriteValidator
 
+from .progress import report as report_progress
 from .read import tool_errors
 
 log = logging.getLogger("sugarmcp.tools.write")
@@ -45,7 +46,9 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=MUTATING)
     @tool_errors
-    def sugar_create_record(module: str, values: dict[str, Any]) -> dict[str, Any]:
+    async def sugar_create_record(
+        module: str, values: dict[str, Any], mcp_ctx: Context | None = None
+    ) -> dict[str, Any]:
         """Create a new record in a module.
 
         Values are validated against this instance's metadata before anything is sent.
@@ -63,11 +66,13 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             The created record's id and the fields Sugar echoed back.
         """
+        await report_progress(mcp_ctx, 1, total=2, message=f"Validating {module} create")
         context = ctx()
         issues = validator(context).validate(module, values, verb="create")
         if issues:
             raise ValidationError(module, issues)
 
+        await report_progress(mcp_ctx, 2, total=2, message=f"Creating {module} record")
         created = context.client.post(module, values)
         record = trim_record(created) if isinstance(created, dict) else created
         return {
@@ -79,8 +84,8 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=MUTATING)
     @tool_errors
-    def sugar_update_record(
-        module: str, record_id: str, values: dict[str, Any]
+    async def sugar_update_record(
+        module: str, record_id: str, values: dict[str, Any], mcp_ctx: Context | None = None
     ) -> dict[str, Any]:
         """Update fields on an existing record.
 
@@ -97,6 +102,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             The updated record as Sugar echoed it back.
         """
+        await report_progress(mcp_ctx, 1, total=2, message=f"Validating {module} update")
         context = ctx()
         if not values:
             return {"error": "No values supplied — nothing to update."}
@@ -105,6 +111,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         if issues:
             raise ValidationError(module, issues)
 
+        await report_progress(mcp_ctx, 2, total=2, message=f"Updating {module} record")
         updated = context.client.put(f"{module}/{record_id}", values)
         record = trim_record(updated) if isinstance(updated, dict) else updated
         return {
@@ -162,7 +169,9 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=DESTRUCTIVE)
     @tool_errors
-    def sugar_delete_record(module: str, record_id: str) -> dict[str, Any]:
+    async def sugar_delete_record(
+        module: str, record_id: str, mcp_ctx: Context | None = None
+    ) -> dict[str, Any]:
         """Delete a record. This removes it from the CRM.
 
         Sugar performs a soft delete (the row is marked deleted, not dropped), but the
@@ -176,6 +185,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             Confirmation, including the name of what was deleted.
         """
+        await report_progress(mcp_ctx, 1, total=2, message="Reading record before delete")
         context = ctx()
         acl = context.metadata.acl()
         denial = acl.check_write(module, "delete", ())
@@ -191,6 +201,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         except Exception:  # noqa: BLE001 - the delete is what matters
             pass
 
+        await report_progress(mcp_ctx, 2, total=2, message=f"Deleting {module} record")
         context.client.delete(f"{module}/{record_id}")
         return {
             "deleted": True,

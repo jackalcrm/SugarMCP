@@ -6,7 +6,7 @@ session needs to avoid re-deriving or contradicting.
 ## Commands
 
 ```bash
-uv run pytest                      # 191 with fixtures; 139 pass / 52 skip without
+uv run pytest                      # 201 with fixtures; 149 pass / 52 skip without
 uv run scripts/capture_fixtures.py # restore the gitignored fixtures from a live instance
 uv run server.py                   # the MCP server (stdio)
 
@@ -38,7 +38,7 @@ context-budget shaping matters.
 
 `fixtures/` is gitignored — the captures carry customer-identifying detail. `capture_fixtures.py`
 regenerates them; `tests/conftest.py:load_fixture` skips cleanly when they are absent, so a
-fresh clone still runs 139 tests including every ACL-inversion check.
+fresh clone still runs 149 tests including every ACL-inversion check.
 
 Counts asserted in the tests (184 ACL modules, 11/49 denied, 707 endpoints, 627 with a source
 path) come from the 25.2 dev instance and will differ elsewhere. They are pinned deliberately
@@ -114,6 +114,10 @@ Verified Sugar session constraints, which govern any multi-user design:
 - `sugar/` imports nothing from `mcp`; `tools/` is a thin wrapper. Keeps the layer testable
   and makes the stdio → HTTP transport swap a change to session provisioning only.
 - Logging to **stderr**, never `print()` — stdout carries the JSON-RPC stream.
+  Protocol logging (`ctx.info` / `notifications/message`) is deprecated as of 2026-07-28
+  (SEP-2577); do not add it. Long-running tools report **progress** via the injected MCP
+  `Context` (`mcp_ctx`) so the client can show a status line instead of looking stalled.
+  `sugar/` still imports nothing from `mcp` — the helper is `tools/progress.py`.
 - Tools return `{"error": ...}` as data rather than raising, so the model can self-correct.
 - Read tools carry `read_only_hint`; writes do not; destructive ones carry
   `destructive_hint`. That split is the approval boundary — do not blur it. `sugar_api_get`
