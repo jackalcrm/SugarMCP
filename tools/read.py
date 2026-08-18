@@ -12,10 +12,11 @@ opaque transport failure.
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from typing import Any, Callable
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from sugar.context import SugarContext, get_context
@@ -31,6 +32,8 @@ from sugar.shaping import (
     shape_list,
     trim_record,
 )
+
+from .progress import report as report_progress
 
 log = logging.getLogger("sugarmcp.tools.read")
 
@@ -71,29 +74,46 @@ Returns:
 """
 
 
+def _as_tool_error(fn_name: str, exc: BaseException) -> dict[str, Any]:
+    """Turn an exception into the ``{"error": ...}`` dict tools return as data."""
+    if isinstance(exc, SugarError):
+        log.info("%s -> %s", fn_name, exc.label)
+        return exc.as_tool_error()
+    describe = getattr(exc, "as_tool_error", None)
+    if callable(describe):
+        log.info("%s -> %s", fn_name, type(exc).__name__)
+        return describe()
+    log.exception("%s failed", fn_name)
+    return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Convert Sugar failures into result data instead of exceptions.
 
     A raised exception reaches the model as a transport error with no guidance attached; a
     returned dict carries the label, the failing request, and what to do about it.
+
+    Async tools need an async wrapper: the SDK runs sync functions in a worker thread, and
+    a sync wrapper around a coroutine would return the coroutine object un-awaited.
     """
+
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - never kill the server on one bad call
+                return _as_tool_error(fn.__name__, exc)
+
+        return async_wrapper
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except SugarError as exc:
-            log.info("%s -> %s", fn.__name__, exc.label)
-            return exc.as_tool_error()
         except Exception as exc:  # noqa: BLE001 - never kill the server on one bad call
-            # Any exception that can describe itself to a model gets to do so. Keeps this
-            # decorator from having to know about validation, or whatever comes next.
-            describe = getattr(exc, "as_tool_error", None)
-            if callable(describe):
-                log.info("%s -> %s", fn.__name__, type(exc).__name__)
-                return describe()
-            log.exception("%s failed", fn.__name__)
-            return {"error": f"{type(exc).__name__}: {exc}"}
+            return _as_tool_error(fn.__name__, exc)
 
     return wrapper
 
@@ -107,7 +127,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_whoami() -> dict[str, Any]:
+    async def sugar_whoami(mcp_ctx: Context | None = None) -> dict[str, Any]:
         """Identify the Sugar user this server is authenticated as, and what they may do.
 
         Call this first when you need to know whether an action is possible at all. The
@@ -117,10 +137,12 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             User name, id, admin status, licenses, and any modules denied to this user.
         """
+        await report_progress(mcp_ctx, 1, total=2, message="Identifying Sugar user")
         context = ctx()
         me = context.metadata.me().get("current_user", {})
         acl = context.metadata.acl()
         denied = acl.denied_modules()
+        await report_progress(mcp_ctx, 2, total=2, message="Loaded user and ACLs")
         return {
             "user_name": me.get("user_name"),
             "full_name": me.get("full_name"),
@@ -135,7 +157,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_server_info() -> dict[str, Any]:
+    async def sugar_server_info(mcp_ctx: Context | None = None) -> dict[str, Any]:
         """Report the Sugar instance version, edition, and which optional features are present.
 
         Useful when behaviour differs by version, or to confirm which platform and API
@@ -144,8 +166,11 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             Version, flavor, build, host environment, and the server's capability flags.
         """
+        await report_progress(mcp_ctx, 1, total=2, message="Reading instance info")
         context = ctx()
         info = context.metadata.server_info
+        caps = context.capabilities()
+        await report_progress(mcp_ctx, 2, total=2, message="Loaded instance info")
         return {
             "version": info.get("version"),
             "flavor": info.get("flavor"),
@@ -153,14 +178,16 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
             "product": info.get("product_name"),
             "host_environment": info.get("host_environment"),
             "full_text_search": info.get("fts", {}).get("enabled"),
-            **context.capabilities(),
+            **caps,
         }
 
     # -- discovery ----------------------------------------------------------
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_list_modules(include_inaccessible: bool = False) -> dict[str, Any]:
+    async def sugar_list_modules(
+        include_inaccessible: bool = False, mcp_ctx: Context | None = None
+    ) -> dict[str, Any]:
         """List the Sugar modules this user can access, with their display labels.
 
         Nothing about modules is hard-coded: this reflects the instance's actual
@@ -177,8 +204,12 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             The module list, and counts of total versus custom modules.
         """
+        await report_progress(mcp_ctx, 1, total=2, message="Loading module catalog")
         context = ctx()
         modules = context.metadata.list_modules(include_inaccessible=include_inaccessible)
+        await report_progress(
+            mcp_ctx, 2, total=2, message=f"{len(modules)} modules"
+        )
         return {
             "modules": modules,
             "count": len(modules),
@@ -187,15 +218,19 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=READ_ONLY, description=DESCRIBE_MODULE_DOC)
     @tool_errors
-    def sugar_describe_module(
+    async def sugar_describe_module(
         module: str,
         fields: list[str] | None = None,
         include_links: bool = False,
         refresh: bool = False,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
-        return ctx().metadata.describe(
+        await report_progress(mcp_ctx, 1, total=2, message=f"Describing {module}")
+        described = ctx().metadata.describe(
             module, fields=fields, include_links=include_links, refresh=refresh
         )
+        await report_progress(mcp_ctx, 2, total=2, message=f"Described {module}")
+        return described
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
@@ -224,13 +259,14 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_query_records(
+    async def sugar_query_records(
         module: str,
         filter: list[dict[str, Any]] | None = None,
         fields: list[str] | None = None,
         order_by: str | None = None,
         max_num: int | None = None,
         offset: int = 0,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Query records in a module using Sugar's filter DSL.
 
@@ -275,6 +311,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
             ``instance_url + "/#" + module + "/" + <id>`` and present rows as
             ``[<name>](<url>)``; opening one requires the user be logged into Sugar there.
         """
+        await report_progress(mcp_ctx, 1, total=3, message=f"Validating {module} query")
         context = ctx()
         config = context.config
         limit = clamp(max_num, config.max_records, config.max_records_ceiling)
@@ -315,6 +352,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         if order_by:
             body["order_by"] = order_by
 
+        await report_progress(mcp_ctx, 2, total=3, message=f"Fetching {module} records")
         # POST rather than GET: avoids URL-length limits and JSON-in-querystring escaping.
         payload = context.client.post(f"{module}/filter", body)
         result = shape_list(payload)
@@ -339,12 +377,17 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         note = describe_truncation(result)
         if note:
             result["note"] = note
+        await report_progress(
+            mcp_ctx, 3, total=3, message=f"{result.get('count', len(result.get('records') or []))} {module} records"
+        )
         return result
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_count_records(
-        module: str, filter: list[dict[str, Any]] | None = None
+    async def sugar_count_records(
+        module: str,
+        filter: list[dict[str, Any]] | None = None,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Count records matching a filter, without fetching them.
 
@@ -358,6 +401,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             The matching record count.
         """
+        await report_progress(mcp_ctx, 1, total=2, message=f"Counting {module} records")
         context = ctx()
         warnings: list[str] = []
         if filter:
@@ -381,6 +425,9 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
             # Especially important on a count: a dropped condition turns "how many match"
             # into "how many exist", and the number looks perfectly plausible.
             result["warning"] = warnings if len(warnings) > 1 else warnings[0]
+        await report_progress(
+            mcp_ctx, 2, total=2, message=f"{result.get('count')} {module} records"
+        )
         return result
 
     @mcp.tool(annotations=READ_ONLY)
@@ -413,7 +460,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_get_related(
+    async def sugar_get_related(
         module: str,
         record_id: str,
         link_name: str,
@@ -421,6 +468,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         fields: list[str] | None = None,
         max_num: int | None = None,
         offset: int = 0,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
         """List records related to a given record through a named relationship.
 
@@ -441,6 +489,9 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             The related records, plus ``next_offset`` for pagination.
         """
+        await report_progress(
+            mcp_ctx, 1, total=2, message=f"Fetching {module}.{link_name}"
+        )
         context = ctx()
         config = context.config
         limit = clamp(max_num, config.max_records, config.max_records_ceiling)
@@ -460,13 +511,18 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         )
         result = shape_list(payload)
         result.update({"module": module, "record_id": record_id, "link_name": link_name})
+        await report_progress(
+            mcp_ctx, 2, total=2, message=f"{result.get('count', len(result.get('records') or []))} related records"
+        )
         return result
 
     # -- saved reports ------------------------------------------------------
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_list_reports(query: str = "", max_num: int | None = None) -> dict[str, Any]:
+    async def sugar_list_reports(
+        query: str = "", max_num: int | None = None, mcp_ctx: Context | None = None
+    ) -> dict[str, Any]:
         """List saved reports defined in this Sugar instance.
 
         Reports are records in the Reports module; use this to find one, then run it with
@@ -479,6 +535,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             Saved reports with id, name, type and the module each reports on.
         """
+        await report_progress(mcp_ctx, 1, total=2, message="Listing saved reports")
         context = ctx()
         config = context.config
         limit = clamp(max_num, config.max_records, config.max_records_ceiling)
@@ -494,15 +551,17 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         payload = context.client.post("Reports/filter", body)
         result = shape_list(payload)
         result["count"] = len(result.get("records") or [])
+        await report_progress(mcp_ctx, 2, total=2, message=f"{result['count']} reports")
         return result
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_run_report(
+    async def sugar_run_report(
         report_id: str,
         max_rows: int | None = None,
         offset: int = 0,
         count_only: bool = False,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Run a saved report and return its rows.
 
@@ -526,6 +585,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             The report's rows, its display columns, and the total row count.
         """
+        await report_progress(mcp_ctx, 1, total=4, message="Counting report rows")
         context = ctx()
         config = context.config
         limit = clamp(max_rows, config.max_records, config.max_records_ceiling)
@@ -539,10 +599,12 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
             pass  # a missing count must not stop the report from running
 
         if count_only:
+            await report_progress(mcp_ctx, 4, total=4, message=f"{total} rows")
             return {"report_id": report_id, "total_rows": total}
 
         # The report definition names the columns the report actually displays. Without it
         # every row carries the full bean.
+        await report_progress(mcp_ctx, 2, total=4, message="Reading report columns")
         columns: list[str] = []
         labels: dict[str, str] = {}
         try:
@@ -556,11 +618,13 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         except SugarError:
             pass  # fall back to returning whole records, still clamped
 
+        await report_progress(mcp_ctx, 3, total=4, message="Fetching report records")
         payload = context.client.get(f"Reports/{report_id}/records")
         rows = payload.get("records") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             rows = []
 
+        await report_progress(mcp_ctx, 4, total=4, message="Shaping report rows")
         window = rows[max(0, offset):max(0, offset) + limit]
         shaped = []
         for row in window:
@@ -597,8 +661,11 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
 
     @mcp.tool(annotations=READ_ONLY)
     @tool_errors
-    def sugar_search(
-        query: str, modules: list[str] | None = None, max_num: int | None = None
+    async def sugar_search(
+        query: str,
+        modules: list[str] | None = None,
+        max_num: int | None = None,
+        mcp_ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Search across modules by free text, using Sugar's full-text index.
 
@@ -617,6 +684,7 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
         Returns:
             Matching records with their module and id.
         """
+        await report_progress(mcp_ctx, 1, total=2, message=f"Searching for {query!r}")
         context = ctx()
         config = context.config
         limit = clamp(max_num, config.max_records, config.max_records_ceiling)
@@ -640,4 +708,5 @@ def register(mcp: MCPServer, context_provider: Callable[[], SugarContext] = get_
                 "No full-text matches. The instance's search index may not be populated. "
                 "Try sugar_query_records with a $contains filter on a specific module."
             )
+        await report_progress(mcp_ctx, 2, total=2, message=f"{len(records)} matches")
         return result

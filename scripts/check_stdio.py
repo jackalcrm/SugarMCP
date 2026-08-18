@@ -64,13 +64,24 @@ async def main() -> int:
             print(f"PASS  sugar_whoami — user={payload.get('user_name')} "
                   f"admin={payload.get('is_admin')}")
 
+            progress_events: list[tuple] = []
+
+            async def on_progress(progress, total, message):
+                progress_events.append((progress, total, message))
+                print(f"      progress {progress}/{total}: {message}")
+
             result = await session.call_tool(
                 "sugar_query_records",
                 {"module": "Accounts", "fields": ["id", "name"], "max_num": 2},
+                progress_callback=on_progress,
             )
             payload = result.structured_content or {}
             print(f"PASS  sugar_query_records — {payload.get('count')} records, "
                   f"{len(json.dumps(payload))}B")
+            if not progress_events:
+                print("FAIL  sugar_query_records sent no progress notifications")
+                return 1
+            print(f"PASS  progress — {len(progress_events)} updates")
 
             result = await session.call_tool("sugar_count_records", {"module": "Accounts"})
             print(f"PASS  sugar_count_records — "
