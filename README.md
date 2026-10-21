@@ -108,6 +108,93 @@ to the environment rather than failing.
 To run read-only, add `"env": {"SUGAR_READ_ONLY": "1"}` to the server block — the write tools
 are then never registered.
 
+## Running remotely over HTTP
+
+The server speaks two transports, selected by `MCP_TRANSPORT` (or a `--http` / `--stdio`
+flag): **stdio** (the default, for local clients like Claude Desktop) and **streamable
+HTTP** (for remote hosting and Claude custom connectors). The tool layer is identical across
+both; only how the process is reached changes. Every value is configured from the
+environment — see [.env.example](.env.example).
+
+Two behaviors are specific to HTTP and on by default, for safety:
+
+- **Write tools default OFF.** Under HTTP, `SUGAR_READ_ONLY` is forced to `1` unless you set
+  it explicitly; the write tools are then never registered. Set `SUGAR_READ_ONLY=0` to allow
+  writes over HTTP.
+- **Authentication is required.** The server refuses to start the HTTP transport unless
+  `MCP_AUTH_TOKEN` is set. The connector must send `Authorization: Bearer <token>`. The
+  `/health` route is always unauthenticated. For throwaway local testing you may set
+  `MCP_ALLOW_ANONYMOUS=1` to override — never on a reachable address.
+
+### Locally
+
+```bash
+# stdio (unchanged)
+uv run server.py
+
+# HTTP on http://localhost:8000/mcp
+MCP_TRANSPORT=http MCP_AUTH_TOKEN=dev-secret uv run server.py
+curl -s localhost:8000/health         # {"status":"ok","transport":"http","read_only":true}
+```
+
+### In a container
+
+```bash
+cp .env.example .env                  # fill in SUGAR_*, set MCP_AUTH_TOKEN
+docker compose up --build             # serves on :8000, MCP_TRANSPORT=http
+curl -s localhost:8000/health
+```
+
+No Sugar URL, credentials, or client-specific values are baked into the image — all come
+from `.env` at run time. The image runs unprivileged and ships a `/health` `HEALTHCHECK`.
+It is a plain Docker image with no platform-specific base or runtime, so it runs unchanged
+on a DigitalOcean droplet, a client VM, ECS, or anywhere Docker runs.
+
+### Exposing it publicly
+
+The server speaks plain HTTP; terminate TLS in front of it. Two documented options — neither
+is a dependency, pick whichever fits the deployment:
+
+**Option A — reverse proxy (portable default).** Put Caddy, nginx, or Traefik in front with
+a real certificate and proxy to `127.0.0.1:8000`. Caddy, for example, obtains and renews a
+Let's Encrypt cert automatically:
+
+```
+mcp.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+**Option B — Cloudflare Tunnel.** Convenient when you cannot open an inbound port (behind
+NAT, on a client LAN). It is one ingress option, not a requirement:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+Either way, add the connector in Claude as a custom connector pointing at
+`https://<your-host>/mcp` (the `/mcp` path, not the root), with the bearer token you set in
+`MCP_AUTH_TOKEN`. The `/health` endpoint is handy for uptime checks and load-balancer probes.
+
+### Observability
+
+Each tool call logs one structured line to **stderr** (stdout stays reserved for the stdio
+JSON-RPC stream): `tool=… actor=… duration_ms=… outcome=…`. `actor` is the configured Sugar
+user — under a static bearer there is no per-caller identity yet (see below).
+
+### Future seams (not built in this spike)
+
+- **Per-user OAuth passthrough.** Today the server authenticates to Sugar as one real user
+  (`grant_type=password`), so every HTTP caller shares that user's roles, teams, and
+  field-level security. Respecting Sugar permissions *per calling user* means replacing the
+  static bearer with the MCP SDK's OAuth path (`token_verifier` / `AuthSettings`) and making
+  the session provider in [sugar/context.py](sugar/context.py) a per-caller, session-keyed
+  lookup. Sugar's own OAuth is limited (`authorization_code`/`client_credentials` are
+  unimplemented) unless SugarIdentity/OIDC is enabled.
+- **Multi-tenancy** (one instance serving several clients), **rate limiting**, and
+  **stateless horizontal scale** (`MCP_STATELESS_HTTP=1` is wired but off) are out of scope;
+  the one-instance-per-client model keeps the current process-wide context fine for now.
+
 ## Tools
 
 The fourteen read tools are annotated `readOnlyHint`, so the whole set can be "always allow"ed

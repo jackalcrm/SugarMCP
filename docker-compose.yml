@@ -1,0 +1,18 @@
+# Local container testing for the HTTP transport.
+#   cp .env.example .env   # fill in SUGAR_* and set MCP_AUTH_TOKEN
+#   docker compose up --build
+# Then: curl -s localhost:8000/health
+#
+# Nothing client-specific lives here — all config comes from .env, which is gitignored.
+services:
+  sugarmcp:
+    build: .
+    image: sugarmcp:dev
+    env_file: .env
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_PORT: "8000"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

@@ -25,9 +25,12 @@ import os
 import sys
 
 from mcp.server.mcpserver import MCPServer
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 import tools.read as read_tools
 from sugar.config import ConfigError, SugarConfig
+from transport import HEALTH_PATH, HttpSettings, RequestLogMiddleware, serve_http
 
 logging.basicConfig(
     level=os.environ.get("SUGAR_LOG_LEVEL", "INFO").upper(),
@@ -52,23 +55,39 @@ queries — this instance holds hundreds of thousands of records with 175+ field
 """
 
 
-def build_server() -> MCPServer:
+def build_server(transport: str = "stdio") -> MCPServer:
     """Construct the server and register the tool sets.
 
     The write tools are *not registered at all* when SUGAR_READ_ONLY is set, rather than
     registered and refused at call time. A tool that does not exist cannot be approved by
     mistake.
+
+    ``transport`` is used only for the /health payload and the structured log actor; it does
+    not change which tools register.
     """
     mcp = MCPServer(
         name="SugarCRM",
         version="0.1.0",
         instructions=INSTRUCTIONS,
+        # One structured stderr line per tool call (tool, actor, duration, outcome). Harmless
+        # under stdio, where it is simply never triggered by an HTTP request logger upstream.
+        middleware=[RequestLogMiddleware()],
     )
 
     read_tools.register(mcp)
     registered = ["read"]
 
     read_only = (os.environ.get("SUGAR_READ_ONLY") or "").strip().lower() in ("1", "true", "yes", "on")
+
+    # Liveness only: no Sugar call, so a down instance (the connection is lazy) still reports
+    # healthy. Registered unconditionally; it only receives traffic under HTTP. The SDK leaves
+    # this route unauthenticated by design.
+    @mcp.custom_route(HEALTH_PATH, methods=["GET"])
+    async def health(_request: Request) -> JSONResponse:  # noqa: ARG001
+        return JSONResponse(
+            {"status": "ok", "transport": transport, "read_only": read_only}
+        )
+
     if read_only:
         log.info("SUGAR_READ_ONLY is set — write tools will not be registered")
     else:
@@ -94,7 +113,37 @@ def build_server() -> MCPServer:
     return mcp
 
 
+def _select_transport(argv: list[str]) -> str:
+    """stdio (default) unless MCP_TRANSPORT=http or a --http flag is given."""
+    if "--http" in argv:
+        return "http"
+    if "--stdio" in argv:
+        return "stdio"
+    value = (os.environ.get("MCP_TRANSPORT") or "stdio").strip().lower()
+    return "http" if value in ("http", "streamable-http") else "stdio"
+
+
 def main() -> int:
+    transport = _select_transport(sys.argv[1:])
+
+    # The remote surface defaults to read-only: writes are off unless explicitly re-enabled.
+    # stdio is untouched. Set the env var before SugarConfig/build_server read it, so write
+    # tools are genuinely never registered — not merely refused.
+    if transport == "http" and (os.environ.get("SUGAR_READ_ONLY") or "") == "":
+        os.environ["SUGAR_READ_ONLY"] = "1"
+        log.info("HTTP transport: defaulting to read-only (set SUGAR_READ_ONLY=0 to allow writes)")
+
+    http_settings: HttpSettings | None = None
+    if transport == "http":
+        http_settings = HttpSettings.from_env()
+        if not http_settings.auth_token and not http_settings.allow_anonymous:
+            log.error(
+                "Refusing to start HTTP transport without authentication. Set MCP_AUTH_TOKEN "
+                "to a strong secret, or set MCP_ALLOW_ANONYMOUS=1 to override (local testing "
+                "only — never on a reachable address)."
+            )
+            return 2
+
     try:
         # Validate configuration early so a missing variable is a clear log line rather
         # than a puzzling failure on the first tool call. The connection itself stays lazy.
@@ -104,11 +153,17 @@ def main() -> int:
         return 2
 
     log.info(
-        "Target: %s as %s (platform=%s, api=%s, read_only=%s)",
+        "Target: %s as %s (platform=%s, api=%s, read_only=%s, transport=%s)",
         config.url, config.username, config.platform, config.api_version, config.read_only,
+        transport,
     )
 
-    build_server().run(transport="stdio")
+    mcp = build_server(transport=transport)
+    if transport == "http":
+        assert http_settings is not None
+        serve_http(mcp, http_settings)
+    else:
+        mcp.run(transport="stdio")
     return 0
 
 
