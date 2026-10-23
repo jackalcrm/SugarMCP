@@ -14,6 +14,108 @@ subdomain.** This is the portable path you can replicate inside any client's inf
 plain Docker + a standard reverse proxy, no vendor lock-in. Use **Cloudflare Tunnel** instead
 only when you can't open an inbound port or get public DNS (NAT, locked-down client LAN).
 
+## Provisioning a fresh Ubuntu VM (cloud-init, portable)
+
+Prefer a **bare Ubuntu 24.04 LTS** image with the script below pasted into the provider's
+"user data" field, over a provider-specific "Docker" marketplace image. The marketplace image
+only saves the Docker install, and it exists only on that one provider — this script runs
+unchanged on any Ubuntu VM (DigitalOcean, a client's AWS box, bare metal), which is the
+portability you want for a repeatable client deployment. It also recreates the non-root
+sudo/docker user a marketplace image would otherwise set up.
+
+> **Secrets stay out of user-data.** Provider user-data is readable from the instance
+> metadata service and stored by the provider. This script *generates* the bearer token on
+> the box; you fill the Sugar credentials by hand after boot. Never paste `SUGAR_PASSWORD`,
+> `SUGAR_CLIENT_SECRET`, or a real `MCP_AUTH_TOKEN` into user-data.
+
+Edit the three values at the top, then paste as user data:
+
+```bash
+#!/bin/bash
+# ------------------------- EDIT THESE -------------------------
+DOMAIN="mcp.example.com"                                   # your subdomain (DNS set separately)
+APP_USER="deploy"                                          # non-root user to own + run the app
+REPO_URL="https://github.com/jackalcrm/SugarMCP.git"       # or leave and scp the code if private
+# --------------------------------------------------------------
+set -ux   # trace to /var/log/cloud-init-output.log; no -e so a transient mirror blip can't abort
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Patch + automatic security updates
+apt-get update -y && apt-get upgrade -y
+apt-get install -y ufw curl git ca-certificates openssl unattended-upgrades
+dpkg-reconfigure -f noninteractive unattended-upgrades
+
+# 2. Docker CE + Compose v2 from Docker's official repo (NOT the older apt docker.io)
+curl -fsSL https://get.docker.com | sh
+systemctl enable --now docker
+
+# 3. Non-root sudo + docker user, with the root SSH key copied so you can log in as them
+id -u "$APP_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos "" "$APP_USER"
+usermod -aG sudo,docker "$APP_USER"
+echo "$APP_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$APP_USER" && chmod 440 "/etc/sudoers.d/90-$APP_USER"
+if [ -f /root/.ssh/authorized_keys ]; then
+  install -d -m 700 -o "$APP_USER" -g "$APP_USER" "/home/$APP_USER/.ssh"
+  install -m 600 -o "$APP_USER" -g "$APP_USER" /root/.ssh/authorized_keys "/home/$APP_USER/.ssh/authorized_keys"
+fi
+# Optional hardening — uncomment ONLY after confirming you can SSH in as $APP_USER, or you lock yourself out:
+# sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/; s/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && systemctl restart ssh
+
+# 4. Host firewall. NOTE: Docker-published ports bypass UFW, so this alone will NOT block
+#    8000 if it is published on 0.0.0.0 — step 6 binds it to localhost, and a provider
+#    cloud firewall (edge) is the real control. UFW here protects non-Docker ports.
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow OpenSSH
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
+
+# 5. Caddy for automatic HTTPS (systemd-managed, auto-renewing certs)
+install -m 0755 -d /usr/share/keyrings
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+apt-get update -y && apt-get install -y caddy
+if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "mcp.example.com" ]; then
+  printf '%s {\n    reverse_proxy 127.0.0.1:8000\n}\n' "$DOMAIN" > /etc/caddy/Caddyfile
+  systemctl reload caddy || systemctl restart caddy   # retries until DNS points here
+fi
+
+# 6. App source, owned by $APP_USER
+install -d -o "$APP_USER" -g "$APP_USER" /opt/sugarmcp
+sudo -u "$APP_USER" git clone "$REPO_URL" /opt/sugarmcp || echo "clone failed (private repo?) — scp the code to /opt/sugarmcp"
+# Bind the published port to localhost so only same-host Caddy reaches it (defeats the UFW bypass)
+[ -f /opt/sugarmcp/docker-compose.yml ] && sed -i 's|"8000:8000"|"127.0.0.1:8000:8000"|' /opt/sugarmcp/docker-compose.yml
+
+# 7. Pre-fill .env with a strong generated bearer token; Sugar creds are left blank for you
+if [ -f /opt/sugarmcp/.env.example ] && [ ! -f /opt/sugarmcp/.env ]; then
+  sudo -u "$APP_USER" cp /opt/sugarmcp/.env.example /opt/sugarmcp/.env
+  TOKEN="$(openssl rand -hex 32)"
+  sudo -u "$APP_USER" sed -i "s|^MCP_AUTH_TOKEN=.*|MCP_AUTH_TOKEN=$TOKEN|" /opt/sugarmcp/.env
+fi
+
+# 8. Leave the operator clear next steps
+cat > /etc/motd <<EOF
+
+SugarMCP provisioned. Finish setup:
+  1. Point DNS A record for $DOMAIN at this droplet's IP.
+  2. sudo -iu $APP_USER; cd /opt/sugarmcp
+  3. Edit .env: fill SUGAR_URL / SUGAR_USERNAME / SUGAR_PASSWORD / SUGAR_CLIENT_SECRET
+     (MCP_AUTH_TOKEN is already set — read it with: grep MCP_AUTH_TOKEN .env)
+  4. docker compose up -d --build   &&   curl -s localhost:8000/health
+  5. Add https://$DOMAIN/mcp as a Claude custom connector with that bearer token.
+
+EOF
+```
+
+**What it does / doesn't do.** It installs and hardens the box and stages the app, but
+deliberately does **not** start the container — the server refuses to run without Sugar
+credentials, which only you can supply. Watch `/var/log/cloud-init-output.log` if anything
+looks missing. Then follow the `motd` steps (they mirror sections 2–5 below).
+
+**Also attach a provider cloud firewall** (DigitalOcean: Networking → Firewalls) allowing only
+22/80/443. It sits at the network edge, so unlike UFW it *does* block any Docker-published
+port — belt to the localhost-bind suspenders.
+
 ## 1. Prerequisites
 
 - A host with Docker + Docker Compose.
