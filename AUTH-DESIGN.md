@@ -8,19 +8,30 @@ decision matrix, where it slots into the existing seams, and a testable referenc
 
 ## Problem
 
-Two things the spike's static bearer cannot do:
+**Correction to an earlier assumption:** the claude.ai connector UI *does* accept a fixed
+bearer token — under a **Request headers** section (set `authorization: Bearer <token>`). So
+the spike's static bearer **is** usable from the connector, not just from curl/Claude Code.
+Caveat: that section is a **limited beta** — "available to a limited set of organizations; if
+you don't see the Request headers section… your organization doesn't have access yet." (Verified
+Oct 2026, see sources at the end.)
 
-1. **It isn't addable the way a regular user adds monday.com / Salesforce.** The claude.ai
-   connector UI is built around OAuth — the user enters a URL and logs in; there is no field
-   to paste a bearer token. A static-bearer server only works for header-capable clients
-   (Claude Code, the API, curl).
-2. **Every caller shares one Sugar user's permissions.** Today SugarMCP logs in as one real
-   user ([sugar/session.py](sugar/session.py)); the bearer authenticates *the connector*, not
-   the human. Respecting each user's roles/teams/field-security needs per-caller identity.
+That changes *testing*, not the *goal*. What the static bearer still can't do:
 
-Storing per-user Sugar passwords (in `.env` or a login page) is not viable for companies, and
-a shared service user doesn't give per-user permissions. The answer is an **identity
-provider**.
+1. **It's one shared credential, not per-user identity.** "Everyone who uses the connector
+   shares the same credential." So a fixed header proves the connector works and suffices for a
+   single trusted operator, but it can't tell SugarMCP *which* human is calling.
+2. **Every caller therefore shares one Sugar user's permissions.** Today SugarMCP logs in as one
+   real user ([sugar/session.py](sugar/session.py)). Respecting each user's roles/teams/
+   field-security needs per-caller identity — which is what OAuth + an IdP provides.
+
+Storing per-user Sugar passwords (in `.env` or a login page) is not viable for companies, and a
+shared service user doesn't give per-user permissions. The answer is an **identity provider**.
+
+**So there are two usable tiers, and they're both legitimate:**
+- **Fixed-header bearer (now):** connector works today, single shared Sugar user. Good for a
+  solo/trusted deployment and for demoing the connector. No new code.
+- **OAuth + IdP + sudo (next milestone):** per-user identity and permissions — the enterprise
+  story and the "normal connector" sign-in experience.
 
 ## The two hops (the core mental model)
 
@@ -65,6 +76,34 @@ Claude ──Bearer <IdP token>──▶ SugarMCP
 SugarMCP advertises OAuth **protected-resource metadata** so Claude discovers which IdP to use;
 Claude runs the whole OAuth dance against the IdP; SugarMCP only ever *validates* the resulting
 token. This is less code than hosting an AS and keeps SugarMCP out of the password business.
+
+## What Claude's connector actually requires (verified Oct 2026)
+
+From Anthropic's connector docs — these answer the biggest "verify, don't assume" item and
+pin the Keycloak client config:
+
+- **Discovery via 401.** Claude expects the MCP endpoint to answer an unauthenticated request
+  with `401` + `WWW-Authenticate: Bearer resource_metadata="https://<host>/.well-known/oauth-protected-resource"`.
+  It then reads the `authorization_servers` list from that metadata to find the IdP. Our current
+  `StaticBearerMiddleware` returns a bare `WWW-Authenticate: Bearer` — the SDK's `AuthSettings`/
+  `token_verifier` path emits the correct challenge and serves the metadata, which is why we use it.
+- **PKCE S256 is mandatory** — Claude sends `code_challenge` with `code_challenge_method=S256`
+  on every authorize request. (Keycloak supports it.)
+- **Client identity: CIMD or DCR.** Claude uses a Client ID Metadata Document when the AS
+  advertises it, and **falls back to Dynamic Client Registration (RFC 7591)** otherwise. Keycloak
+  doesn't do CIMD, so **enable DCR** on the realm and Claude self-registers. Claude registers as a
+  **public client** (no secret; PKCE instead).
+- **Redirect URIs** (needed if you pre-register a client instead of DCR, and to allow-list in
+  Keycloak's registration policy):
+  - Hosted (claude.ai web, Desktop, mobile): `https://claude.ai/api/mcp/auth_callback`
+  - Claude Code: `http://localhost:3118/callback` (port-agnostic localhost/127.0.0.1)
+- **Scope:** Claude requests a `claudeai` scope — the AS must accept it (define/allow it in
+  Keycloak so registration/authorize doesn't reject an unknown scope).
+- **Audience / resource (RFC 8707):** our `TokenVerifier` validates the token's audience against
+  the SugarMCP resource URL (`AuthSettings.resource_server_url`).
+- **Fixed-header fallback:** header names offered include `authorization`, `x-api-key`,
+  `x-auth-token`; up to 4 headers; the value is stored write-only and shared by all users of the
+  connector.
 
 ## Decision matrix (the consulting playbook)
 
@@ -188,11 +227,25 @@ id.example.com  { reverse_proxy 127.0.0.1:8080 }
 
 ## Assumptions to verify on the instance (don't reason from docs)
 
-- Claude's connector OAuth: does it do **dynamic client registration**, or need a manual client
-  + known redirect URI? What resource/audience does it expect? (Drives Keycloak client setup.)
-- `POST /oauth2/sudo/<user>` from the admin on a dedicated platform: confirm no eviction and
-  that the resulting token carries the target's ACLs (we have fixture evidence; re-confirm for
-  the token-driven path).
-- Does the chosen admin user actually have `sudo` rights on this instance? ENT-only?
-- Which IdP claim is the right join key against this customer's Sugar user records.
-- JWKS caching / key rotation behaviour from the IdP's discovery doc.
+Claude's connector OAuth shape is now answered above (DCR fallback, PKCE S256, redirect URIs,
+`claudeai` scope, 401-metadata discovery). Still open:
+
+- **Does this org have the "Request headers" beta?** Determines whether the fixed-bearer
+  connector test is available now, or we go "No sign in" + anonymous. Check the Add-connector
+  dialog.
+- **Keycloak DCR policy** must allow Claude to self-register with the `https://claude.ai/api/mcp/
+  auth_callback` redirect URI and the `claudeai` scope (default anonymous-registration policies
+  may reject one or both).
+- `POST /oauth2/sudo/<user>` from the admin on a dedicated platform: confirm no eviction and that
+  the resulting token carries the target's ACLs (fixture evidence exists; re-confirm for the
+  token-driven path). Confirm the admin user has `sudo` rights; check ENT-only.
+- Which IdP claim is the right join key against the customer's Sugar user records.
+- JWKS caching / key-rotation behaviour from the IdP's discovery doc.
+
+## Sources
+
+- Get started with custom connectors (support): https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp
+- Use connectors / plan availability (support): https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities
+- Authentication for connectors (docs): https://claude.com/docs/connectors/building/authentication
+- Add a connector that isn't in the directory (docs): https://claude.com/docs/connectors/custom/remote-mcp
+- MCP Authorization spec: https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
